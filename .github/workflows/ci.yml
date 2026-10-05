@@ -31,27 +31,43 @@ jobs:
       - name: Install GJS, GTK 4, libadwaita, Xvfb
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gjs gir1.2-adw-1 gir1.2-gtk-4.0 xvfb
+          sudo apt-get install -y -qq gjs gir1.2-adw-1 gir1.2-gtk-4.0 xvfb gnome-shell-common
       - name: Preferences window under Xvfb
         run: bash gnome/test/prefs-xvfb.sh
-      - name: Installer dry run (symlinked layout, fake HOME)
+      - name: Installer dry run (symlinked layout, fake HOME, no running shell)
+        # No GNOME Shell runs here, so `gnome-extensions enable` cannot work,
+        # exactly like a colleague's first install. The installer must then put
+        # the uuid on GNOME's enabled-extensions list itself. gnome-shell-common
+        # provides that setting's schema; the keyfile backend stores the value
+        # under XDG_CONFIG_HOME instead of needing a dconf session.
         run: |
           export HOME="$RUNNER_TEMP/home"
           export XDG_CONFIG_HOME="$HOME/.config"
+          export GSETTINGS_BACKEND=keyfile
           mkdir -p "$HOME/.local/share/gnome-shell/extensions"
           ln -s "$GITHUB_WORKSPACE" "$HOME/.local/share/gnome-shell/extensions/ball-on-a-string@local"
+          gsettings set org.gnome.shell disabled-extensions "['ball-on-a-string@local']"
           PATH=/usr/bin:/bin bash gnome/install.sh
           test -f "$HOME/.local/share/gnome-shell/extensions/ball-on-a-string@local/physics.js"
           test -x "$HOME/.local/bin/balls"
           test -f "$HOME/.config/ball-on-a-string.json"
           "$HOME/.local/bin/balls" off && grep -q '"visible": false' "$HOME/.config/ball-on-a-string.json"
+          # The extension must be on the enabled list and off the disabled list,
+          # so GNOME starts it at the next login without a manual enable.
+          gsettings get org.gnome.shell enabled-extensions | grep -q "'ball-on-a-string@local'"
+          ! gsettings get org.gnome.shell disabled-extensions | grep -q "'ball-on-a-string@local'"
+          # Running the installer twice must not duplicate the entry.
+          PATH=/usr/bin:/bin bash gnome/install.sh
+          test "$(gsettings get org.gnome.shell enabled-extensions | grep -o 'ball-on-a-string@local' | wc -l)" = 1
       - name: Uninstaller dry run (same fake HOME)
         run: |
           export HOME="$RUNNER_TEMP/home"
           export XDG_CONFIG_HOME="$HOME/.config"
+          export GSETTINGS_BACKEND=keyfile
           EXT="$HOME/.local/share/gnome-shell/extensions/ball-on-a-string@local"
           PATH=/usr/bin:/bin bash gnome/install.sh --uninstall
           test ! -e "$EXT"
+          ! gsettings get org.gnome.shell enabled-extensions | grep -q "'ball-on-a-string@local'"
           test ! -e "$HOME/.local/bin/balls"
           test -f "$HOME/.config/ball-on-a-string.json"      # settings survive without --purge
           PATH=/usr/bin:/bin bash gnome/install.sh --uninstall --purge

@@ -21,8 +21,45 @@ DEST="$EXT_DIR/$UUID"
 BIN_DIR="$HOME/.local/bin"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/ball-on-a-string.json"
 
+# enabled_list add|remove: put the uuid on / take it off GNOME's list of enabled
+# extensions directly (org.gnome.shell enabled-extensions), for when the running
+# shell cannot be asked. Exit status 1 if the setting is not available.
+enabled_list() {
+    python3 - "$UUID" "$1" <<'PY'
+import ast, subprocess, sys
+uuid, mode = sys.argv[1], sys.argv[2]
+
+def read(key):
+    r = subprocess.run(["gsettings", "get", "org.gnome.shell", key],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit(1)
+    s = r.stdout.strip()
+    if s.startswith("@as"):            # an empty list prints as "@as []"
+        s = s[3:].strip()
+    return list(ast.literal_eval(s))   # GVariant string lists read like Python lists
+
+def write(key, items):
+    value = "[" + ", ".join("'" + x + "'" for x in items) + "]"
+    r = subprocess.run(["gsettings", "set", "org.gnome.shell", key, value])
+    if r.returncode != 0:
+        sys.exit(1)
+
+enabled = read("enabled-extensions")
+disabled = read("disabled-extensions")
+if mode == "add":
+    if uuid not in enabled:
+        write("enabled-extensions", enabled + [uuid])
+    if uuid in disabled:
+        write("disabled-extensions", [x for x in disabled if x != uuid])
+else:
+    if uuid in enabled:
+        write("enabled-extensions", [x for x in enabled if x != uuid])
+PY
+}
+
 uninstall() {   # $1 = "--purge" to remove the config file as well
-    gnome-extensions disable "$UUID" 2>/dev/null || true
+    gnome-extensions disable "$UUID" 2>/dev/null || enabled_list remove 2>/dev/null || true
     for d in "$DEST" "$EXT_DIR/$OLD_UUID"; do
         if [ -L "$d" ]; then
             rm "$d";     echo "Removed $d (was a symlink; the project folder is untouched)"
@@ -90,11 +127,21 @@ if [ ! -e "$CONFIG" ]; then
     echo "Created $CONFIG"
 fi
 
+# Switch the extension on. GNOME keeps a list of enabled extensions (the
+# org.gnome.shell enabled-extensions setting) and only runs what is on it.
+# `gnome-extensions enable` asks the running shell to add us, which works on a
+# re-install but fails on a first install: the shell scans the extensions
+# folder only at login, so it does not know us yet. In that case put the uuid
+# on the list ourselves (the same thing `gnome-extensions enable` does when no
+# shell is running); the shell finds it there at the next login and starts
+# the extension without anyone having to type anything.
 if gnome-extensions enable "$UUID" 2>/dev/null; then
-    echo "Enable requested."
+    echo "Enabled."
+elif enabled_list add 2>/dev/null; then
+    echo "Marked as enabled; GNOME starts it at your next login (the running GNOME had not loaded it yet)."
 else
-    echo "The running shell has not seen the extension yet (expected on first install)."
-    echo "After logging back in, run:  gnome-extensions enable $UUID"
+    echo "Could not mark the extension as enabled. After logging back in, run:"
+    echo "    gnome-extensions enable $UUID"
 fi
 
 cat <<EOF
