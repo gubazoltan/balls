@@ -43,8 +43,22 @@ done
 
 echo "Compiling..."
 # (the XCTest/xcrun warning from command-line-tools-only installs is harmless: no tests here)
-(cd "$HERE" && swift build -c release 2>&1 | grep -v "XCTest\|xcrun: error" | tail -3)
-BIN="$(cd "$HERE" && swift build -c release --show-bin-path)/BallOnAString"
+SWIFT_BUILD_SYSTEM=""
+# SwiftPM 6.4's default swiftbuild backend fails with standalone CLT 27.0.
+# TODO: Remove after https://github.com/swiftlang/swift-package-manager/issues/10561 is fixed.
+if [ "$(xcode-select -p 2>/dev/null || true)" = "/Library/Developer/CommandLineTools" ] &&
+   swift package --version 2>/dev/null | grep -q 'Swift 6\.4'; then
+    SWIFT_BUILD_SYSTEM="native"
+fi
+swift_build() {
+    if [ -n "$SWIFT_BUILD_SYSTEM" ]; then
+        swift build --build-system "$SWIFT_BUILD_SYSTEM" "$@"
+    else
+        swift build "$@"
+    fi
+}
+(cd "$HERE" && swift_build -c release 2>&1 | grep -v "XCTest\|xcrun: error" | tail -3)
+BIN="$(cd "$HERE" && swift_build -c release --show-bin-path)/BallOnAString"
 [ -x "$BIN" ] || { echo "error: build produced no executable" >&2; exit 1; }
 
 echo "Assembling $APP"
