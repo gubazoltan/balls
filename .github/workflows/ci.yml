@@ -6,106 +6,122 @@ on:
 
 jobs:
   engine:
-    name: Engine (shared physics + config)
+    name: Engine
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Syntax check every JavaScript file
+      - name: Syntax check
         run: for f in engine/*.js gnome/*.js; do node --check "$f"; done
-      - name: Engine unit tests
+      - name: Unit tests
         run: node --test 'engine/test/*.test.mjs'
 
   gnome:
-    name: GNOME layer (mocked shell + real GTK prefs window)
+    name: GNOME extension
     runs-on: ubuntu-latest
+    env:
+      UUID: ball-on-a-string@local
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Extension against the shell mock
+      - name: Tests against the shell mock
         run: node --test 'gnome/test/*.test.mjs'
-      - name: Install GJS, GTK 4, libadwaita, Xvfb
+      - name: Install GJS, GTK 4, libadwaita, Xvfb, GNOME Shell schemas
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq gjs gir1.2-adw-1 gir1.2-gtk-4.0 xvfb gnome-shell-common
       - name: Preferences window under Xvfb
         run: bash gnome/test/prefs-xvfb.sh
-      - name: Installer dry run (symlinked layout, fake HOME, no running shell)
-        # No GNOME Shell runs here, so `gnome-extensions enable` cannot work,
-        # exactly like a colleague's first install. The installer must then put
-        # the uuid on GNOME's enabled-extensions list itself. gnome-shell-common
-        # provides that setting's schema; the keyfile backend stores the value
-        # under XDG_CONFIG_HOME instead of needing a dconf session.
+
+      # The install/uninstall checks run in a throwaway HOME with no GNOME Shell,
+      # i.e. the situation of a first install. GSettings uses the keyfile backend
+      # so no D-Bus session is needed.
+      - name: Install
+        env:
+          HOME: ${{ runner.temp }}/home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/home/.config
+          GSETTINGS_BACKEND: keyfile
         run: |
-          export HOME="$RUNNER_TEMP/home"
-          export XDG_CONFIG_HOME="$HOME/.config"
-          export GSETTINGS_BACKEND=keyfile
-          mkdir -p "$HOME/.local/share/gnome-shell/extensions"
-          ln -s "$GITHUB_WORKSPACE" "$HOME/.local/share/gnome-shell/extensions/ball-on-a-string@local"
-          gsettings set org.gnome.shell disabled-extensions "['ball-on-a-string@local']"
+          EXT="$HOME/.local/share/gnome-shell/extensions/$UUID"
+          mkdir -p "$(dirname "$EXT")"
+          ln -s "$GITHUB_WORKSPACE" "$EXT"                       # pre-existing symlinked layout
+          gsettings set org.gnome.shell disabled-extensions "['$UUID']"
+
           PATH=/usr/bin:/bin bash gnome/install.sh
-          test -f "$HOME/.local/share/gnome-shell/extensions/ball-on-a-string@local/physics.js"
+
+          test -f "$EXT/physics.js"
           test -x "$HOME/.local/bin/balls"
-          test -f "$HOME/.config/ball-on-a-string.json"
-          "$HOME/.local/bin/balls" off && grep -q '"visible": false' "$HOME/.config/ball-on-a-string.json"
-          # The extension must be on the enabled list and off the disabled list,
-          # so GNOME starts it at the next login without a manual enable.
-          gsettings get org.gnome.shell enabled-extensions | grep -q "'ball-on-a-string@local'"
-          ! gsettings get org.gnome.shell disabled-extensions | grep -q "'ball-on-a-string@local'"
-          # Running the installer twice must not duplicate the entry.
+          test -f "$XDG_CONFIG_HOME/ball-on-a-string.json"
+          "$HOME/.local/bin/balls" off
+          grep -q '"visible": false' "$XDG_CONFIG_HOME/ball-on-a-string.json"
+
+          # Enabled for the next login without a manual `gnome-extensions enable`.
+          gsettings get org.gnome.shell enabled-extensions | grep -q "'$UUID'"
+          ! gsettings get org.gnome.shell disabled-extensions | grep -q "'$UUID'"
+
+          # Re-running is idempotent.
           PATH=/usr/bin:/bin bash gnome/install.sh
-          test "$(gsettings get org.gnome.shell enabled-extensions | grep -o 'ball-on-a-string@local' | wc -l)" = 1
-      - name: Uninstaller dry run (same fake HOME)
+          test "$(gsettings get org.gnome.shell enabled-extensions | grep -o "$UUID" | wc -l)" = 1
+
+      - name: Uninstall
+        env:
+          HOME: ${{ runner.temp }}/home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/home/.config
+          GSETTINGS_BACKEND: keyfile
         run: |
-          export HOME="$RUNNER_TEMP/home"
-          export XDG_CONFIG_HOME="$HOME/.config"
-          export GSETTINGS_BACKEND=keyfile
-          EXT="$HOME/.local/share/gnome-shell/extensions/ball-on-a-string@local"
+          EXT="$HOME/.local/share/gnome-shell/extensions/$UUID"
+          CONFIG="$XDG_CONFIG_HOME/ball-on-a-string.json"
+
           PATH=/usr/bin:/bin bash gnome/install.sh --uninstall
           test ! -e "$EXT"
-          ! gsettings get org.gnome.shell enabled-extensions | grep -q "'ball-on-a-string@local'"
           test ! -e "$HOME/.local/bin/balls"
-          test -f "$HOME/.config/ball-on-a-string.json"      # settings survive without --purge
+          test -f "$CONFIG"                                      # settings survive
+          ! gsettings get org.gnome.shell enabled-extensions | grep -q "'$UUID'"
+
           PATH=/usr/bin:/bin bash gnome/install.sh --uninstall --purge
-          test ! -e "$HOME/.config/ball-on-a-string.json"
-          # A symlinked extension dir: only the link may go, never the project behind it.
+          test ! -e "$CONFIG"
+
+          # A symlinked extension dir: only the link goes, never the project behind it.
           ln -s "$GITHUB_WORKSPACE" "$EXT"
           PATH=/usr/bin:/bin bash gnome/install.sh --uninstall
           test ! -L "$EXT" && test -f "$GITHUB_WORKSPACE/gnome/install.sh"
-          # Unknown flags are refused instead of installing.
+
           ! bash gnome/install.sh --bogus
 
   macos:
-    name: macOS app (build + bridge tests)
+    name: macOS app
     runs-on: macos-15
+    defaults:
+      run:
+        working-directory: macos
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build -c release
-        working-directory: macos
-      - name: Bridge and config tests
+      - name: Tests
         run: swift test
-        working-directory: macos
       - name: Assemble the .app
-        run: bash build.sh
-        working-directory: macos
-      - name: Check the bundle
         run: |
-          test -x "macos/build/Ball on a String.app/Contents/MacOS/BallOnAString"
-          test -f "macos/build/Ball on a String.app/Contents/Resources/physics.js"
-          plutil -lint "macos/build/Ball on a String.app/Contents/Info.plist"
-      - name: Uninstaller dry run (fake HOME, app not installed)
+          bash build.sh
+          test -x "build/Ball on a String.app/Contents/MacOS/BallOnAString"
+          test -f "build/Ball on a String.app/Contents/Resources/physics.js"
+          plutil -lint "build/Ball on a String.app/Contents/Info.plist"
+      - name: Uninstall
+        env:
+          HOME: ${{ runner.temp }}/home
         run: |
-          export HOME="$RUNNER_TEMP/home"
-          mkdir -p "$HOME/.config" && echo '{}' > "$HOME/.config/ball-on-a-string.json"
+          CONFIG="$HOME/.config/ball-on-a-string.json"
+          mkdir -p "$(dirname "$CONFIG")" && echo '{}' > "$CONFIG"
+
           bash build.sh --uninstall
           test ! -e "build/Ball on a String.app"
-          test -f "$HOME/.config/ball-on-a-string.json"      # settings survive without --purge
+          test -f "$CONFIG"                                      # settings survive
+
           bash build.sh --uninstall --purge
-          test ! -e "$HOME/.config/ball-on-a-string.json"
+          test ! -e "$CONFIG"
+
           ! bash build.sh --bogus
-        working-directory: macos
